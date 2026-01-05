@@ -1,0 +1,16 @@
+project_id = "pmwupewwcsrcdaghxmqz"
+
+[functions.seed-vehicle-data]
+verify_jwt = true
+
+[functions.send-stage-notification]
+verify_jwt = true
+
+[functions.create-shop-user]
+verify_jwt = true
+
+[functions.notify-estimators-new-quote]
+verify_jwt = false
+
+[functions.get-customer-portal-data]
+verify_jwt = false
