@@ -17,6 +17,21 @@ interface NotifyRequest {
   caseNumber?: string;
 }
 
+interface EstimatorProfile {
+  id: string;
+  user_id: string | null;
+  first_name: string | null;
+  last_name: string | null;
+  email: string | null;
+  job_role: string | null;
+}
+
+interface EmailResult {
+  email: string;
+  success: boolean;
+  error?: unknown;
+}
+
 const handler = async (req: Request): Promise<Response> => {
   console.log("notify-estimators-new-quote function called");
 
@@ -26,16 +41,20 @@ const handler = async (req: Request): Promise<Response> => {
   }
 
   try {
-    const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
-    const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-    const supabase = createClient(supabaseUrl, supabaseServiceKey);
+    const supabaseUrl = Deno.env.get("SUPABASE_URL");
+    const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
 
+    if (!supabaseUrl || !supabaseServiceKey) {
+      throw new Error("Missing Supabase environment variables");
+    }
+
+    const supabase = createClient(supabaseUrl, supabaseServiceKey);
     const { quotationId, quoteNumber, customerName, vehicleDetails, caseNumber }: NotifyRequest = await req.json();
 
     console.log("Received request:", { quotationId, quoteNumber, customerName, vehicleDetails, caseNumber });
 
     // Fetch all active estimators with valid email addresses
-    const { data: estimators, error: estimatorsError } = await supabase
+    const { data: rawEstimators, error: estimatorsError } = await supabase
       .from("profiles")
       .select("id, user_id, first_name, last_name, email, job_role")
       .eq("is_active", true)
@@ -47,6 +66,9 @@ const handler = async (req: Request): Promise<Response> => {
       throw estimatorsError;
     }
 
+    // Cast to strict type
+    const estimators = rawEstimators as EstimatorProfile[] | null;
+
     console.log(`Found ${estimators?.length || 0} estimators to notify`);
 
     if (!estimators || estimators.length === 0) {
@@ -57,12 +79,18 @@ const handler = async (req: Request): Promise<Response> => {
       );
     }
 
+    // Determine the base URL for the CTA button
+    // Prefers a set SITE_URL, falls back to deriving from Supabase URL (Lovable pattern), or '#'
+    const baseUrl = Deno.env.get("SITE_URL") ||
+      Deno.env.get("SUPABASE_URL")?.replace('.supabase.co', '.lovable.app') ||
+      '#';
+
     // Send emails to all estimators
-    const emailPromises = estimators.map(async (estimator) => {
+    const emailPromises = estimators.map(async (estimator): Promise<EmailResult | null> => {
       if (!estimator.email) return null;
 
       const estimatorName = [estimator.first_name, estimator.last_name].filter(Boolean).join(" ") || "Estimator";
-      
+
       try {
         const emailResponse = await resend.emails.send({
           from: "Workshop Quotes <onboarding@resend.dev>",
@@ -118,7 +146,7 @@ const handler = async (req: Request): Promise<Response> => {
                   <p>Please log in to the system to review and assign yourself to this quote.</p>
                   
                   <div class="cta">
-                    <a href="${Deno.env.get("SUPABASE_URL")?.replace('.supabase.co', '.lovable.app') || '#'}/estimators" class="button">
+                    <a href="${baseUrl}/estimators" class="button">
                       View Unquoted Jobs
                     </a>
                   </div>
@@ -131,7 +159,7 @@ const handler = async (req: Request): Promise<Response> => {
             </html>
           `,
         });
-        
+
         console.log(`Email sent to ${estimator.email}:`, emailResponse);
         return { email: estimator.email, success: true };
       } catch (emailError) {
@@ -141,24 +169,28 @@ const handler = async (req: Request): Promise<Response> => {
     });
 
     const results = await Promise.all(emailPromises);
-    const successCount = results.filter(r => r?.success).length;
-    const failCount = results.filter(r => r && !r.success).length;
+    const validResults = results.filter((r): r is EmailResult => r !== null);
+
+    const successCount = validResults.filter(r => r.success).length;
+    const failCount = validResults.filter(r => !r.success).length;
 
     console.log(`Email notification complete: ${successCount} sent, ${failCount} failed`);
 
     return new Response(
-      JSON.stringify({ 
-        success: true, 
+      JSON.stringify({
+        success: true,
         message: `Notified ${successCount} estimators`,
         details: { sent: successCount, failed: failCount }
       }),
       { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
 
-  } catch (error: any) {
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
     console.error("Error in notify-estimators-new-quote function:", error);
+
     return new Response(
-      JSON.stringify({ error: error.message }),
+      JSON.stringify({ error: errorMessage }),
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   }
